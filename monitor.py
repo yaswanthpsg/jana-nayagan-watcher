@@ -4,33 +4,45 @@ import os
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
-# ===================== CONFIG =====================
+# ===================== ENV VARIABLES =====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# URLs to monitor
-BMS_URL = "https://in.bookmyshow.com/movies/coimbatore/jana-nayagan/buytickets/ET00430817/20260109"
-DISTRICT_URL = "https://www.district.in/movies/coimbatore"
-TICKETNEW_URL = "https://ticketnew.com/movies/jana-nayagan-movie-detail-188681"
+if not BOT_TOKEN or not CHAT_ID:
+    raise Exception("BOT_TOKEN or CHAT_ID not set in environment variables")
 
-CHECK_INTERVAL = 60  # seconds
+# ===================== CONFIG =====================
+
 RUN_DAYS = 6
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-
-# Track already-alerted theatres
-seen_theatres = set()
+CHECK_INTERVAL = 60  # seconds
 
 END_TIME = datetime.utcnow() + timedelta(days=RUN_DAYS)
 
-# ==================================================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
+    "Referer": "https://in.bookmyshow.com/"
+}
 
+# ===== BOOKMYSHOW CONFIG =====
+BMS_MOVIE_CODE = "ET00430817"
+BMS_CITY = "coimbatore"
+BMS_BOOKING_URL = (
+    f"https://in.bookmyshow.com/movies/{BMS_CITY}/jana-nayagan/"
+    f"buytickets/{BMS_MOVIE_CODE}/20260109"
+)
+
+# ===== TICKETNEW CONFIG =====
+TICKETNEW_URL = "https://ticketnew.com/movies/coimbatore"
+
+# ===================== STATE =====================
+
+seen_theatres = set()
+
+# ===================== UTILS =====================
 
 def send_alert(message):
-    """Send message to Telegram group"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -40,12 +52,56 @@ def send_alert(message):
     requests.post(url, data=payload, timeout=10)
 
 
+def now():
+    return datetime.now().strftime("%d %b %Y %I:%M %p")
+
+
+# ===================== BOOKMYSHOW (API) =====================
+
+def check_bookmyshow_per_theatre():
+    api_url = (
+        "https://in.bookmyshow.com/api/explore/v1/showtimes"
+        f"?movieCode={BMS_MOVIE_CODE}"
+        f"&city={BMS_CITY}"
+    )
+
+    resp = requests.get(api_url, headers=HEADERS, timeout=15)
+
+    if resp.status_code != 200:
+        return
+
+    data = resp.json()
+    cinemas = data.get("cinemas", [])
+
+    for cinema in cinemas:
+        theatre = cinema.get("cinemaName", "").strip()
+        shows = cinema.get("shows", [])
+
+        if not theatre or not shows:
+            continue
+
+        key = f"BMS::{theatre}"
+
+        if key not in seen_theatres:
+            seen_theatres.add(key)
+            send_alert(
+                f"🚨 NEW THEATRE OPENED 🚨\n\n"
+                f"🎬 Jana Nayagan\n"
+                f"🏢 {theatre}\n"
+                f"📍 Coimbatore\n"
+                f"🌐 Platform: BookMyShow\n"
+                f"🕒 {now()}\n\n"
+                f"👉 Book now:\n{BMS_BOOKING_URL}"
+            )
+
+# ===================== TICKETNEW =====================
+
 def extract_theatres_from_text(text):
-    """Extract possible theatre names from page text"""
     theatres = set()
     keywords = [
-        "pvr", "inox", "cinepolis", "kg", "broadway",
-        "miraj", "karpagam", "theatre", "cinema"
+        "pvr", "inox", "cinepolis", "kg",
+        "broadway", "miraj", "karpagam",
+        "theatre", "cinema"
     ]
 
     for line in text.splitlines():
@@ -58,66 +114,22 @@ def extract_theatres_from_text(text):
     return theatres
 
 
-def check_bookmyshow():
-    resp = requests.get(BMS_URL, headers=HEADERS, timeout=15)
+def check_ticketnew_coimbatore():
+    resp = requests.get(TICKETNEW_URL, timeout=15)
     soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text(separator="\n").lower()
+    text = soup.get_text(separator="\n")
 
-    # If booking page is live, theatre names will appear
-    theatres = extract_theatres_from_text(text)
-
-    for theatre in theatres:
-        key = f"BMS::{theatre}"
-        if key not in seen_theatres:
-            seen_theatres.add(key)
-            send_alert(
-                f"🚨 NEW THEATRE OPENED 🚨\n\n"
-                f"🎬 Jana Nayagan\n"
-                f"🏢 {theatre}\n"
-                f"📍 Coimbatore\n"
-                f"🌐 Platform: BookMyShow\n"
-                f"🕒 {datetime.now().strftime('%d %b %Y %I:%M %p')}\n\n"
-                f"👉 Book now:\n{BMS_URL}"
-            )
-
-
-def check_district():
-    resp = requests.get(DISTRICT_URL, headers=HEADERS, timeout=15)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text(separator="\n").lower()
-
-    if "jana nayagan" not in text:
+    if "jana nayagan" not in text.lower():
         return
 
-    theatres = extract_theatres_from_text(text)
-
-    for theatre in theatres:
-        key = f"DISTRICT::{theatre}"
-        if key not in seen_theatres:
-            seen_theatres.add(key)
-            send_alert(
-                f"🚨 NEW THEATRE OPENED 🚨\n\n"
-                f"🎬 Jana Nayagan\n"
-                f"🏢 {theatre}\n"
-                f"📍 Coimbatore\n"
-                f"🌐 Platform: District\n"
-                f"🕒 {datetime.now().strftime('%d %b %Y %I:%M %p')}\n\n"
-                f"👉 Book now:\n{DISTRICT_URL}"
-            )
-
-
-def check_ticketnew():
-    resp = requests.get(TICKETNEW_URL, headers=HEADERS, timeout=15)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text(separator="\n").lower()
-
-    if "no shows" in text or "not available" in text:
+    if "coimbatore" not in text.lower():
         return
 
     theatres = extract_theatres_from_text(text)
 
     for theatre in theatres:
         key = f"TICKETNEW::{theatre}"
+
         if key not in seen_theatres:
             seen_theatres.add(key)
             send_alert(
@@ -126,23 +138,21 @@ def check_ticketnew():
                 f"🏢 {theatre}\n"
                 f"📍 Coimbatore\n"
                 f"🌐 Platform: TicketNew\n"
-                f"🕒 {datetime.now().strftime('%d %b %Y %I:%M %p')}\n\n"
+                f"🕒 {now()}\n\n"
                 f"👉 Book now:\n{TICKETNEW_URL}"
             )
 
-
 # ===================== MAIN LOOP =====================
 
-send_alert("🎬 Jana Nayagan booking watcher started (All theatres, 6 days monitoring)")
+send_alert("🎬 Jana Nayagan watcher started (Coimbatore only • Per theatre • 6 days)")
 
 while datetime.utcnow() < END_TIME:
     try:
-        check_bookmyshow()
-        check_district()
-        check_ticketnew()
+        check_bookmyshow_per_theatre()
+        check_ticketnew_coimbatore()
     except Exception as e:
         send_alert(f"⚠️ Watcher error:\n{str(e)}")
 
     time.sleep(CHECK_INTERVAL)
 
-send_alert("⏹ Jana Nayagan booking watcher stopped (6 days completed)")
+send_alert("⏹ Jana Nayagan watcher stopped (6 days completed)")
